@@ -1,47 +1,43 @@
-import dotenv from 'dotenv';
-dotenv.config();
+import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import compression from "compression";
+import swaggerUi from "swagger-ui-express";
+import prisma from "./prisma.js";
+import { config } from "./config.js";
+import { requestLogger } from "./middlewares/requestLogger.js";
+import { globalLimiter } from "./middlewares/rateLimiter.js";
+import { errorHandler } from "./middlewares/errorHandler.js";
+import eventRoutes from "./routes/event.routes.js";
+import bookingRoutes from "./routes/booking.routes.js";
+import userRoutes from "./routes/user.routes.js";
+import { openApiDocument } from "./docs/openapi.js";
 
-import express, { Application, Request, Response, NextFunction } from 'express';
-import helmet from 'helmet';
-import cors from 'cors';
-import compression from 'compression';
-import prisma from './prisma';
-
-const app: Application = express();
+const app = express();
 
 app.use(helmet());
-app.use(cors());
+app.use(cors({ origin: config.CORS_ORIGIN }));
 app.use(compression());
-app.use(express.json());
+app.use(express.json({ limit: config.BODY_SIZE_LIMIT }));
+app.use(requestLogger);
+app.use(globalLimiter);
 
-app.get('/health', async (req: Request, res: Response) => {
+app.use("/docs", swaggerUi.serve, swaggerUi.setup(openApiDocument));
+app.get("/docs.json", (_req, res) => res.json(openApiDocument));
+
+app.get("/health", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.status(200).json({ status: 'UP', database: 'CONNECTED' });
+    res.status(200).json({ status: "UP", database: "CONNECTED" });
   } catch {
-    res.status(503).json({ status: 'UP', database: 'DISCONNECTED' });
+    res.status(503).json({ status: "UP", database: "DISCONNECTED" });
   }
 });
 
-app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-  const statusCode = err.status || 500;
-  res.status(statusCode).json({
-    success: false,
-    message: err.message || 'Internal Server Error',
-    stack: process.env.NODE_ENV === 'production' ? null : err.stack,
-  });
-});
+app.use("/api/events", eventRoutes);
+app.use("/api/events", bookingRoutes);
+app.use("/api/users", userRoutes);
 
-const PORT = process.env.PORT || 3000;
+app.use(errorHandler);
 
-async function main() {
-  await prisma.$connect();
-  console.log('Database connected');
-
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-}
-
-main().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+export default app;

@@ -1,0 +1,481 @@
+{
+  "info": {
+    "name": "Event Booking API",
+    "description": "Full regression suite for the Event Booking System.\n\nRun in order — later requests depend on variables set by earlier ones.\n\nVariables: `baseUrl`, `testUserId`, `testUserId2`",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "testUserId", "value": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+    { "key": "testUserId2", "value": "11111111-2222-3333-4444-555555555555" },
+    { "key": "eventId", "value": "" },
+    { "key": "bookingId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Server is UP', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('UP');",
+                  "  pm.expect(body.database).to.eql('CONNECTED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Events",
+      "item": [
+        {
+          "name": "GET /api/events — List events",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/events?page=1&limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "events"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Response has success=true', () => pm.expect(body.success).to.be.true);",
+                  "pm.test('Data is an array', () => pm.expect(body.data).to.be.an('array'));",
+                  "pm.test('Meta has pagination fields', () => {",
+                  "  pm.expect(body.meta).to.have.property('page');",
+                  "  pm.expect(body.meta).to.have.property('limit');",
+                  "  pm.expect(body.meta).to.have.property('total');",
+                  "  pm.expect(body.meta).to.have.property('totalPages');",
+                  "});",
+                  "pm.test('Events have availableSpots', () => {",
+                  "  if (body.data.length > 0) {",
+                  "    pm.expect(body.data[0]).to.have.property('availableSpots');",
+                  "    pm.collectionVariables.set('eventId', body.data[0].id);",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/events — Invalid page",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/events?page=-1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "events"],
+              "query": [{ "key": "page", "value": "-1" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 400', () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is false', () => pm.expect(body.success).to.be.false);",
+                  "pm.test('Has validation errors', () => pm.expect(body.errors).to.be.an('array'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/events/:id — Event details",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/events/{{eventId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Response has success=true', () => pm.expect(body.success).to.be.true);",
+                  "pm.test('Event has expected fields', () => {",
+                  "  const d = body.data;",
+                  "  pm.expect(d).to.have.property('id');",
+                  "  pm.expect(d).to.have.property('name');",
+                  "  pm.expect(d).to.have.property('date');",
+                  "  pm.expect(d).to.have.property('capacity');",
+                  "  pm.expect(d).to.have.property('bookedCount');",
+                  "  pm.expect(d).to.have.property('availableSpots');",
+                  "  pm.expect(d.availableSpots).to.eql(d.capacity - d.bookedCount);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/events/:id — Not found",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/events/00000000-0000-0000-0000-000000000000"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 404', () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is false', () => pm.expect(body.success).to.be.false);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api/events/:id — Invalid UUID",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/events/not-a-uuid"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 400', () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is false', () => pm.expect(body.success).to.be.false);",
+                  "pm.test('Has validation errors', () => pm.expect(body.errors).to.be.an('array'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Bookings",
+      "item": [
+        {
+          "name": "POST — Book event (success)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/events/{{eventId}}/bookings",
+            "header": [{ "key": "x-user-id", "value": "{{testUserId}}" }]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is true', () => pm.expect(body.success).to.be.true);",
+                  "pm.test('Booking has expected fields', () => {",
+                  "  const d = body.data;",
+                  "  pm.expect(d).to.have.property('id');",
+                  "  pm.expect(d.status).to.eql('CONFIRMED');",
+                  "  pm.expect(d.eventId).to.eql(pm.collectionVariables.get('eventId'));",
+                  "  pm.expect(d.userId).to.eql(pm.collectionVariables.get('testUserId'));",
+                  "});",
+                  "pm.collectionVariables.set('bookingId', body.data.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST — Duplicate booking (409)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/events/{{eventId}}/bookings",
+            "header": [{ "key": "x-user-id", "value": "{{testUserId}}" }]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 409', () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is false', () => pm.expect(body.success).to.be.false);",
+                  "pm.test('Message indicates already booked', () => {",
+                  "  pm.expect(body.message).to.include('already have an active booking');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST — Missing x-user-id (400)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/events/{{eventId}}/bookings"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 400', () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is false', () => pm.expect(body.success).to.be.false);",
+                  "pm.test('Message mentions user-id', () => {",
+                  "  pm.expect(body.message).to.include('x-user-id');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST — Non-existent event (404)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/events/00000000-0000-0000-0000-000000000000/bookings",
+            "header": [{ "key": "x-user-id", "value": "{{testUserId}}" }]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 404', () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is false', () => pm.expect(body.success).to.be.false);",
+                  "pm.test('Message is Event not found', () => {",
+                  "  pm.expect(body.message).to.eql('Event not found');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE — Cancel booking (success)",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/events/{{eventId}}/bookings",
+            "header": [{ "key": "x-user-id", "value": "{{testUserId}}" }]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is true', () => pm.expect(body.success).to.be.true);",
+                  "pm.test('Status is CANCELLED', () => {",
+                  "  pm.expect(body.data.status).to.eql('CANCELLED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE — No active booking (404)",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/events/{{eventId}}/bookings",
+            "header": [{ "key": "x-user-id", "value": "{{testUserId}}" }]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 404', () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is false', () => pm.expect(body.success).to.be.false);",
+                  "pm.test('Message indicates no booking', () => {",
+                  "  pm.expect(body.message).to.include('No active booking');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST — Re-book after cancel (success)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/events/{{eventId}}/bookings",
+            "header": [{ "key": "x-user-id", "value": "{{testUserId}}" }]
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('Re-booking works after cancel', () => {",
+                  "  pm.expect(body.success).to.be.true;",
+                  "  pm.expect(body.data.status).to.eql('CONFIRMED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "User Bookings",
+      "item": [
+        {
+          "name": "GET /api/users/:userId/bookings — List all",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/users/{{testUserId}}/bookings"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is true', () => pm.expect(body.success).to.be.true);",
+                  "pm.test('Data is an array', () => pm.expect(body.data).to.be.an('array'));",
+                  "pm.test('Has pagination meta', () => {",
+                  "  pm.expect(body.meta).to.have.property('page');",
+                  "  pm.expect(body.meta).to.have.property('total');",
+                  "});",
+                  "pm.test('Bookings include event details', () => {",
+                  "  if (body.data.length > 0) {",
+                  "    pm.expect(body.data[0]).to.have.property('event');",
+                  "    pm.expect(body.data[0].event).to.have.property('name');",
+                  "    pm.expect(body.data[0].event).to.have.property('date');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET — Filter by CONFIRMED status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/users/{{testUserId}}/bookings?status=CONFIRMED",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users", "{{testUserId}}", "bookings"],
+              "query": [{ "key": "status", "value": "CONFIRMED" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('All bookings are CONFIRMED', () => {",
+                  "  body.data.forEach(b => pm.expect(b.status).to.eql('CONFIRMED'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET — Filter by CANCELLED status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/users/{{testUserId}}/bookings?status=CANCELLED",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users", "{{testUserId}}", "bookings"],
+              "query": [{ "key": "status", "value": "CANCELLED" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('All bookings are CANCELLED', () => {",
+                  "  body.data.forEach(b => pm.expect(b.status).to.eql('CANCELLED'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET — Invalid user UUID (400)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/users/not-a-uuid/bookings"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 400', () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test('success is false', () => pm.expect(body.success).to.be.false);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET — User with no bookings (empty array)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/users/{{testUserId2}}/bookings"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('Returns empty array, not 404', () => {",
+                  "  pm.expect(body.success).to.be.true;",
+                  "  pm.expect(body.data).to.be.an('array').that.is.empty;",
+                  "  pm.expect(body.meta.total).to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

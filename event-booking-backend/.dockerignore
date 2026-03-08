@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+tests
+*.md
+postman
+.git
+.gitignore
+vitest.config.ts
