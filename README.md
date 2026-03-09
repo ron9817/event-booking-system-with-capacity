@@ -87,6 +87,12 @@ In the current scope, I will build a small event booking system to reserve a spo
   - Atomic increment/decrement with raw SQL
   - Audit log committed inside the transaction (failures logged outside)
 
+### Denormalized Capacity Counter (booked_count)
+
+- Store a pre-computed booked_count on the events row instead of deriving availability at query time via SELECT COUNT(*) FROM bookings WHERE event_id = ? AND status = 'CONFIRMED'.
+- With thousands of bookings per popular event, these aggregation queries grow linearly with booking volume exactly the wrong cost profile for a read dominant workload.
+- Denormalized for faster performance while maintianing consistency via atomic updates within the same transaction
+
 ---
 
 ## Flows
@@ -294,6 +300,7 @@ In the current scope, I will build a small event booking system to reserve a spo
 - Concurrency tests proving correctness under parallel load
 - Unit tests for middleware, utilities, and UI components
 - API regression test suite with Postman/Newman
+- Proper paginations to handle lot of events
 
 ---
 
