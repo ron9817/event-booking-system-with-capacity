@@ -11,53 +11,109 @@ A full-stack event booking system with real-time capacity tracking, concurrency-
 
 ## Booking System Types
 
-Booking system can be of multiple types:
+A booking system can be of multiple types:
 
-1. **RSVP:** A quick booking system to get user registered for meetups, small gathering with fixed limit.
-2. **Seat Booking:** A full fledge booking system for a show, sports game, concerete where there is multiple types of seats, user can select multiple seats, payment system etc.
-3. **System Seat Allocation:** A complex booking system where a event is across multiple dates, multiple nested hierarcy, multiple venues, multiple seats with different capacity and on booking a seat gets allocated based on availability like IRCTC.
-4. **Hotel Room Booking:** Having multiple tier rooms, dynamic pricing, over booking etc.
+1. **RSVP:** A quick booking system to get users registered for meetups and small gatherings with a fixed limit.
+2. **Seat Booking:** A full fledged booking system for a show, sports game, or concert where there are multiple seat types, users can select multiple seats, includes a payment system, etc.
+3. **System Seat Allocation:** A complex booking system where an event spans multiple dates, multiple nested hierarchies, multiple venues, and multiple seats with different capacities — on booking, a seat gets allocated based on availability (like IRCTC).
+4. **Hotel Room Booking:** Multiple tier rooms, dynamic pricing, overbooking, etc.
 5. **A Hybrid**
 
-Scope is endless.
+The scope is endless.
 
-In my current scope I will build a small event booking system to reserve a spot for event with limited capacity.
+In the current scope, I will build a small event booking system to reserve a spot for an event with limited capacity.
 
 ---
 
 ## Functional Requirements
 
-1. User can see all events / meetups taking place in future.
-2. User can view meeting detail.
-3. User can book a event.
-4. User can view his bookings.
-5. User can cancel his bookings. System maintains consistency of capacity.
-6. System maintains capacity constraints, allow for concurrent bookings, one booking per person.
+1. User can see all events / meetups taking place in the future.
+2. User can view event details.
+3. User can book an event.
+4. User can view their bookings.
+5. User can cancel their bookings. System maintains consistency of capacity.
+6. System maintains capacity constraints, allows concurrent bookings, and enforces one booking per person.
 
 ## Non-Functional Requirements
 
-1. Support low latency view of events, bookings. P99 < 200ms
-2. Highly consistent booking and cancellations.
-3. Allow Concurrent bookings.
-4. 99.95% Availability
-5. Read write 10:1 to 100:1
-6. Scalability
-7. Security
-8. Extensibility
+1. Low latency views of events and bookings. P99 < 200ms.
+2. Highly consistent bookings and cancellations.
+3. Allow concurrent bookings.
+4. 99.95% availability.
+5. Read to write ratio of 10:1 to 100:1.
+6. Scalability.
+7. Security.
+8. Extensibility.
 
 ## Out of Scope
 
-1. Backend admin systems for event creation, viewing bookings etc. (Scope: User side actions: booking, cancellations etc)
-2. Payments
-3. Low latency search, filters etc
-4. No realtime capacity updates. (Scope: Option to refresh and view updated capacity)
-5. Observability, error monitoring, apm. (Scope: Proper logging to debug errors)
+1. Backend admin systems for event creation, viewing bookings, etc. (Scope: User-side actions — booking, cancellations, etc.)
+2. Payments.
+3. Low-latency search, filters, etc.
+4. No real-time capacity updates. (Scope: Option to refresh and view updated capacity.)
+5. Observability, error monitoring, APM. (Scope: Proper logging to debug errors.)
 
 ## Assumptions
 
-1. We have authentication, authourization systems in place. Our service recieves `x-user-id` header with logged in user details.
-2. Robust ratelimiting systems in place. Currently we have basic rate limiting on ip to prevent users continuously booking under load when booking might take some time.
-3. Only one booking per user.
+1. We have authentication and authorization systems in place. Our service receives an `x-user-id` header with the logged-in user's details.
+2. Robust rate limiting systems are in place. Currently, we have basic IP based rate limiting to prevent users from continuously retrying bookings under load.
+3. Only one booking per user per event.
+
+---
+
+## Design Choices / Implementation
+
+- Events are pre-seeded (no admin create/edit UI)
+- User identity is simulated via `x-user-id` header (no real auth)
+- User ID is generated and stored in localStorage on the frontend
+
+### SQL vs NoSQL
+
+- A major design decision was choosing between SQL and NoSQL.
+- NoSQL was considered for its higher write throughput and easier horizontal scalability. Event data is relatively schema less and loosely relational, so NoSQL could have been a reasonable fit.
+- However, strong consistency guarantees (capacity constraints under high concurrency), a read heavy workload, and the need for pessimistic locking led to choosing SQL.
+- DynamoDB (NoSQL) supports transactions but follows an optimistic concurrency model, which could be problematic for a high contention booking system. PostgreSQL (RDBMS) was chosen instead.
+
+### Concurrency Handling (Pessimistic vs Optimistic)
+
+- Uses a pessimistic approach with defense in depth via database level constraints.
+- Pessimistic locking was chosen because bookings can have high contention, and every eligible request should succeed, not just the fastest one.
+- An optimistic approach would let only one request win per retry cycle; all others fail and must retry, leading to cascading retries and system thrashing under load.
+- **Features:**
+  - Pessimistic locking with `SELECT ... FOR UPDATE`
+  - Consistent lock ordering (event row first) to prevent deadlocks
+  - Database level CHECK constraint as a safety net (`booked_count <= capacity`)
+  - Atomic increment/decrement with raw SQL
+  - Audit log committed inside the transaction (failures logged outside)
+
+---
+
+## Flows
+
+### Book Flow (`bookEvent`)
+
+1. `SELECT ... FOR UPDATE` on the event row (acquires row lock)
+2. Validate: event exists, is active, is in the future, has capacity
+3. Check no existing active booking for this user (backed by the `unique_active_booking` DB index)
+4. `INSERT` booking
+5. `UPDATE events SET booked_count = booked_count + 1` (DB CHECK constraint is the final safety net)
+6. `INSERT` success audit log
+7. Commit (all 3 writes atomically)
+
+### Cancel Flow (`cancelBooking`)
+
+1. `SELECT ... FOR UPDATE` on the event row (same lock order)
+2. Find the user's confirmed booking
+3. `UPDATE` booking status to `CANCELLED`
+4. `UPDATE events SET booked_count = booked_count - 1`
+5. `INSERT` success audit log
+6. Commit
+
+### Audit Log Strategy
+
+- **Success path:** The audit log `INSERT` runs inside the same transaction as the booking/cancellation. If the transaction commits, the audit log is guaranteed to be persisted. If it rolls back, the audit log is also rolled back — no orphaned records.
+- **Failure path:** When a business rule rejects the request (event not found, already booked, sold out, etc.), the error is caught **outside** the transaction. A separate `logAuditFailure()` call writes the failure record with the rejection reason. This runs in its own implicit transaction so failure audits are recorded even when the main transaction never committed.
+- **Resilience:** If the failure audit write itself fails (e.g., DB connectivity issue), the error is caught and logged via pino — it never masks or overrides the original error thrown to the client.
 
 ---
 
@@ -140,44 +196,6 @@ In my current scope I will build a small event booking system to reserve a spot 
      └───────────────┘ └──────────────┘ └──────────────┘
 ```
 
----
-
-## Table of Contents
-
-- [Booking System Types](#booking-system-types)
-- [Functional Requirements](#functional-requirements)
-- [Non-Functional Requirements](#non-functional-requirements)
-- [Out of Scope](#out-of-scope)
-- [Assumptions](#assumptions)
-- [High-Level System Design](#high-level-system-design)
-- [Current Scope Architecture](#current-scope-architecture)
-- [Design Choices / Implementation](#design-choices--implementation)
-- [Salient Features](#salient-features)
-- [Future Scope](#future-scope)
-- [Code Design Patterns](#code-design-patterns)
-- [DB Schema](#db-schema)
-- [Flows](#flows)
-- [Testing](#testing)
-- [Core User UX](#core-user-ux)
-- [Design Language](#design-language)
-- [Frontend Components](#frontend-components)
-- [Quick Start (Docker)](#quick-start-docker)
-- [Manual Setup](#manual-setup)
-  - [Prerequisites](#prerequisites)
-  - [1. Clone the Repository](#1-clone-the-repository)
-  - [2. Set Up PostgreSQL](#2-set-up-postgresql)
-  - [3. Set Up the Backend](#3-set-up-the-backend)
-  - [4. Set Up the Frontend](#4-set-up-the-frontend)
-  - [5. Verify Everything Works](#5-verify-everything-works)
-- [Project Structure](#project-structure)
-- [Available Scripts](#available-scripts)
-- [API Documentation](#api-documentation)
-- [Environment Variables](#environment-variables)
-- [Running Tests](#running-tests)
-- [Troubleshooting](#troubleshooting)
-
----
-
 ## Current Scope Architecture
 
 ```
@@ -205,56 +223,66 @@ In my current scope I will build a small event booking system to reserve a spot 
 
 ---
 
-## Design Choices / Implementation
+## Table of Contents
 
-- Events are pre-seeded (no admin create/edit UI)
-- User identity is simulated via `x-user-id` header (no real auth)
-- User ID is generated and stored in localStorage on the frontend
-
-### SQL vs NoSQL
-
-- Major design decission was for selecting SQL vs NoSQL
-- NoSQL was considered for higher write throughput, easier scalability, supporting multiple types of event data would be schemaless and less relational so NoSQL could have been better
-- But eventually strong conistency gurantees (capacity constraint under high concurrency), more reads compared to writes, needed pesimistic locking approach decided to go with sql
-- Dynamo support transactions but more of optimistic approach which could have been fatal for our kind concurrent system. So postgre RDMS was decided
-
-### Concurrency Handling (Pessimistic vs Optimistic)
-
-- Uses pesimistic approach with defense in depth using database level constraints
-- Pesimistic choosen as booking could be have high contention and all elligible requests should pass
-- Optimistic have allowed only one to succeed while all other requests failing leading to retries and system getting thrashed
-- **Features:**
-  - Pessimistic locking with `SELECT ... FOR UPDATE`
-  - Consistent lock ordering (event row first) to prevent deadlocks
-  - Database-level CHECK constraint as a safety net (`booked_count <= capacity`)
-  - Atomic increment/decrement with raw SQL
-  - Audit log committed inside the transaction (failures logged outside)
+- [Booking System Types](#booking-system-types)
+- [Functional Requirements](#functional-requirements)
+- [Non-Functional Requirements](#non-functional-requirements)
+- [Out of Scope](#out-of-scope)
+- [Assumptions](#assumptions)
+- [Design Choices / Implementation](#design-choices--implementation)
+- [Flows](#flows)
+- [High-Level System Design](#high-level-system-design)
+- [Current Scope Architecture](#current-scope-architecture)
+- [Salient Features](#salient-features)
+- [Future Scope](#future-scope)
+- [Challenges and Learnings](#challenges-and-learnings)
+- [Code Design Patterns](#code-design-patterns)
+- [DB Schema](#db-schema)
+- [Testing](#testing)
+- [Core User UX](#core-user-ux)
+- [Design Language](#design-language)
+- [Frontend Components](#frontend-components)
+- [Quick Start (Docker)](#quick-start-docker)
+- [Manual Setup](#manual-setup)
+  - [Prerequisites](#prerequisites)
+  - [1. Clone the Repository](#1-clone-the-repository)
+  - [2. Set Up PostgreSQL](#2-set-up-postgresql)
+  - [3. Set Up the Backend](#3-set-up-the-backend)
+  - [4. Set Up the Frontend](#4-set-up-the-frontend)
+  - [5. Verify Everything Works](#5-verify-everything-works)
+- [Project Structure](#project-structure)
+- [Available Scripts](#available-scripts)
+- [API Documentation](#api-documentation)
+- [Environment Variables](#environment-variables)
+- [Running Tests](#running-tests)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Salient Features
 
-- Stateless app tier
-- No deadlocks -- same lock ordering in both bookEvent and cancelBooking
-- No overselling -- concurrent requests serialize on the event row
-- ACID -- everything runs inside a single Prisma interactive transaction
+- Fully stateless app tier — horizontally scalable with no shared in-memory state
+- Zero deadlocks — consistent lock ordering in both `bookEvent` and `cancelBooking`
+- Zero overselling — concurrent requests serialize on the event row via `SELECT ... FOR UPDATE`
+- Full ACID guarantees — every booking/cancellation runs inside a single Prisma interactive transaction
 - Clean layered architecture (routes → controllers → services)
 - Type-safe config with startup validation
 - Structured logging (pino)
 - Request validation (zod)
 - Graceful shutdown
 - Consistent error responses
-- DB constraints as safety nets (CHECK, unique index)
-- Edge cases handling: sold out, multiple bookings, already booked, cancel only booked, capacity constraint
+- DB constraints as safety nets (CHECK constraint + unique index)
+- Comprehensive edge case handling: sold out, already booked, cancel only if booked, capacity overflow
 - Refresh button to get updated capacity
 - Robust logging for debugging
-- Idempotent bookings => unique `user_id` + `event_id` on booking
-- Proper indexes to support high throughput reads
-- Proper audit logging. Handled failure scenarios
+- Idempotent bookings — unique `user_id` + `event_id` constraint on booking
+- Strategic indexes (partial, composite) to support high throughput reads
+- Complete audit trail — both success and failure scenarios are logged
 - Swagger API documentation
-- Booking and cancellation confirmation before user proceeds
-- Robust test suite, API integration test suite using Postman
-- Dockerized application => One click setup
+- Booking and cancellation confirmation before the user proceeds
+- Robust test suite — unit, integration, concurrency, and API regression tests (Postman/Newman)
+- Fully Dockerized — one click setup with `docker compose up`
 - React Query for server state with proper cache invalidation
 - Specific error handling per error type (409, 404, 429)
 - Confirmation modals before destructive actions
@@ -262,24 +290,34 @@ In my current scope I will build a small event booking system to reserve a spot 
 - Accessible modals (focus trap, ARIA, Escape key)
 - Responsive design with Tailwind
 - Integration tests covering full request lifecycle
-- Concurrency tests proving correctness under load
-- Unit tests for middleware and utilities
-- API integration regression test suite with Postman
+- Concurrency tests proving correctness under parallel load
+- Unit tests for middleware, utilities, and UI components
+- API regression test suite with Postman/Newman
 
 ---
 
 ## Future Scope
 
-- Cache event data in Redis with proper invalidation strategy to support higher read throughput
-- Redis (or any cache / distributed KV) should be a best-effort accelerator for sold out events. In case of sold out, request wont hit postgres db reducing load on database with maximum of capacity requests hitting database for booking.
-- Partitioning audit logs as data grows
-- Extend to multiple booking strategies like theatre seat booking
-- Elastic Search for faster and enhanced search support
-- Payments, admin panel for event creation, view event bookings etc
-- Hybrid databases SQL and NoSQL. SQL for consistency vs NoSQL for schema less metadata rich events data.
-- Dynamic pricing, over booking support in case of cancellations
-- GoHighlevel specific support for multi tenancy so solution can be scaled across multiple tenants
-- Event images -- add CDN for faster cached images
+- Cache event data in Redis with a proper invalidation strategy to support higher read throughput.
+- Redis (or any distributed KV) as a best-effort accelerator — sold-out events can be rejected at the cache layer without hitting PostgreSQL, reducing DB load to only capacity-eligible booking requests.
+- Partition audit logs as data grows.
+- Extend to multiple booking strategies like theatre seat booking.
+- Elasticsearch for faster and enhanced search support.
+- Payments, admin panel for event creation, viewing event bookings, etc.
+- Hybrid database strategy: SQL for transactional consistency, NoSQL for schemaless, metadata rich event data.
+- Dynamic pricing and overbooking support in case of cancellations.
+- GoHighLevel-specific support for multi-tenancy so the solution can be scaled across multiple tenants.
+- Event images — add a CDN for faster cached image delivery.
+
+---
+
+## Challenges and Learnings
+
+- Learned that pessimistic locking is the better choice under high contention.
+- Deciding between SQL vs NoSQL for the right consistency guarantees.
+- Keeping the scope small and not chasing too many features — staying focused on the core concurrent capacity problem.
+- Modern tooling like Vite and its ecosystem.
+- JavaScript ecosystem advancements on both the frontend and backend.
 
 ---
 
@@ -366,36 +404,13 @@ WHERE "status" = 'CONFIRMED';
 
 Application level + DB level => Defense in depth:
 
-- **`capacity_safety`** — to prevent over booking
-- **`unique_active_booking`** — to prevent double booking
+- **`capacity_safety`** (CHECK constraint) — prevents overbooking at the database level, even if application logic has a bug
+- **`unique_active_booking`** (partial unique index) — prevents duplicate confirmed bookings at the database level
 
 Indexes:
 
-- **Events partial date** — Most used access pattern would be to view active events
-- **Bookings `user_id`** — Second most used will be to view bookings
-
----
-
-## Flows
-
-### Book Flow (`bookEvent`)
-
-1. `SELECT ... FOR UPDATE` on the event row (acquires row lock)
-2. Validate: event exists, is active, is in the future, has capacity
-3. Check no existing active booking for this user (backed by the `unique_active_booking` DB index)
-4. `INSERT` booking
-5. `UPDATE events SET booked_count = booked_count + 1` (DB CHECK constraint is the final safety net)
-6. `INSERT` success audit log
-7. Commit (all 3 writes atomically)
-
-### Cancel Flow (`cancelBooking`)
-
-1. `SELECT ... FOR UPDATE` on the event row (same lock order)
-2. Find the user's confirmed booking
-3. `UPDATE` booking status to `CANCELLED`
-4. `UPDATE events SET booked_count = booked_count - 1`
-5. `INSERT` success audit log
-6. Commit
+- **Events partial date** — the most common access pattern is viewing active upcoming events
+- **Bookings `user_id`** — the second most common access pattern is viewing a user's bookings
 
 ---
 
@@ -453,7 +468,7 @@ The frontend follows a **Clean Minimal** hybrid design inspired by Luma and Even
 | **CapacityBar**        | Reusable progress bar with color logic             |
 | **TypeBadge**          | Colored pill for event type                        |
 | **StatusBadge**        | Booking status indicator                           |
-| **BookingCard**        | Card for the my bookings list                      |
+| **BookingCard**        | Card for the My Bookings list                      |
 | **ConfirmModal**       | Reusable confirmation dialog                       |
 | **EmptyState**         | Reusable empty state with icon + message + action  |
 | **Skeleton variants**  | Loading placeholders for cards and detail           |
@@ -850,8 +865,8 @@ Interactive Swagger documentation is available at:
 
 Bookings use pessimistic row locking (`SELECT ... FOR UPDATE`) inside serialized database transactions to prevent overselling. Database-level constraints provide defense-in-depth:
 
-- `CHECK (booked_count <= capacity)` prevents overselling even if application logic has a bug
-- `UNIQUE INDEX ON (event_id, user_id) WHERE status = 'CONFIRMED'` prevents duplicate bookings
+- `CHECK (booked_count <= capacity)` — prevents overselling even if application logic has a bug
+- `UNIQUE INDEX ON (event_id, user_id) WHERE status = 'CONFIRMED'` — prevents duplicate bookings at the DB level
 
 ---
 
@@ -898,7 +913,7 @@ npm run test:unit          # Unit tests (no DB needed)
 npm run test:integration   # Integration tests (needs running DB)
 npm run test:concurrency   # Concurrency tests (needs running DB)
 
-npx newman run /postman/Event_Booking_API.postman_collection.json # API intergration regression test suite
+npx newman run /postman/Event_Booking_API.postman_collection.json # API integration regression test suite
 
 # Watch mode
 npm run test:watch
