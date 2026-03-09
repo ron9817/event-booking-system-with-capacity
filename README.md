@@ -33,6 +33,7 @@ In the current scope, I will build a small event booking system to reserve a spo
 4. User can view their bookings.
 5. User can cancel their bookings. System maintains consistency of capacity.
 6. System maintains capacity constraints, allows concurrent bookings, and enforces one booking per person.
+7. Audit log booking change operations.
 
 ## Non-Functional Requirements
 
