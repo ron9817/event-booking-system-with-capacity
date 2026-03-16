@@ -17,6 +17,14 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_BOOKING_WINDOW_MS: z.coerce.number().default(60 * 1000),
   RATE_LIMIT_BOOKING_MAX: z.coerce.number().default(10),
+
+  // Redis config for capacity accelerator
+  REDIS_URL: z.string().url().optional(),
+  REDIS_ENABLED: z
+    .union([z.literal("true"), z.literal("false")])
+    .default("true")
+    .transform((v) => v === "true"),
+  REDIS_DEFAULT_TTL_SECONDS: z.coerce.number().default(24 * 60 * 60),
 });
 
 const parsed = envSchema.safeParse(process.env);

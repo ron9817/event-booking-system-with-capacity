@@ -3,6 +3,7 @@ import request from "supertest";
 import app from "../../src/app.js";
 import { cleanDatabase, seedTestEvent, testPrisma } from "../helpers/db.js";
 import { randomUserId } from "../helpers/fixtures.js";
+import { getRedisClient, isRedisEnabled } from "../../src/infra/redisClient.js";
 
 beforeAll(async () => {
   await testPrisma.$connect();
@@ -51,6 +52,16 @@ describe("Booking Concurrency", () => {
       where: { eventId: event.id, status: "CONFIRMED" },
     });
     expect(bookingCount).toBe(CAPACITY);
+
+    if (isRedisEnabled()) {
+      const client = await getRedisClient();
+      if (client) {
+        const cached = await client.get(`event:${event.id}:remaining`);
+        if (cached != null) {
+          expect(Number(cached)).toBe(0);
+        }
+      }
+    }
   });
 
   it("should never let booked_count go below 0 with concurrent cancellations", async () => {

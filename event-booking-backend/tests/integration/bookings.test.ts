@@ -7,6 +7,7 @@ import {
   TEST_USER_ID_2,
   NON_EXISTENT_ID,
 } from "../helpers/fixtures.js";
+import { getRedisClient, isRedisEnabled } from "../../src/infra/redisClient.js";
 
 beforeAll(async () => {
   await testPrisma.$connect();
@@ -37,6 +38,17 @@ describe("POST /api/events/:eventId/bookings", () => {
       status: "CONFIRMED",
     });
     expect(res.body.data.id).toBeDefined();
+
+    if (isRedisEnabled()) {
+      const client = await getRedisClient();
+      if (client) {
+        const key = `event:${event.id}:remaining`;
+        const cached = await client.get(key);
+        if (cached != null) {
+          expect(Number(cached)).toBe(event.capacity - 1);
+        }
+      }
+    }
   });
 
   it("returns 400 when x-user-id header is missing", async () => {
@@ -105,6 +117,24 @@ describe("POST /api/events/:eventId/bookings", () => {
     expect(res.status).toBe(409);
     expect(res.body.success).toBe(false);
     expect(res.body.message).toMatch(/fully booked/i);
+  });
+
+  it("still allows booking when Redis says 0 remaining but DB has capacity", async () => {
+    const event = await seedTestEvent({ capacity: 2, bookedCount: 0 });
+
+    if (isRedisEnabled()) {
+      const client = await getRedisClient();
+      if (client) {
+        await client.set(`event:${event.id}:remaining`, "0");
+      }
+    }
+
+    const res = await request(app)
+      .post(`/api/events/${event.id}/bookings`)
+      .set("x-user-id", TEST_USER_ID_2);
+
+    expect(res.status).toBe(201);
+    expect(res.body.success).toBe(true);
   });
 
   it("returns 409 when user already has an active booking", async () => {

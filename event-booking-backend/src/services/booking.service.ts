@@ -3,6 +3,10 @@ import prisma from "../prisma.js";
 import { ApiError } from "../utils/ApiError.js";
 import logger from "../utils/logger.js";
 import type { UserBookingsQuery } from "../schemas/booking.schema.js";
+import {
+  getRemainingCapacityHint,
+  setRemainingCapacity,
+} from "./capacityCache.service.js";
 
 interface LockedEventRow {
   id: string;
@@ -95,7 +99,16 @@ export const bookingService = {
    */
   async bookEvent(eventId: string, userId: string) {
     try {
-      return await prisma.$transaction(async (tx) => {
+      // Best-effort Redis fast-path: if we know remaining <= 0, we still verify in DB.
+      const remainingHint = await getRemainingCapacityHint(eventId);
+      if (remainingHint !== null && remainingHint <= 0) {
+        logger.debug(
+          { eventId, remainingHint },
+          "Redis hint says no remaining capacity; verifying in DB",
+        );
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
         // 1. Acquire row-level lock on the event (pessimistic)
         const rows = await tx.$queryRaw<LockedEventRow[]>`
           SELECT id, capacity, booked_count, is_active, date
@@ -140,6 +153,8 @@ export const bookingService = {
           SET booked_count = booked_count + 1, updated_at = NOW()
           WHERE id = ${eventId}::uuid
         `;
+        const remainingAfter =
+          event.capacity - (event.booked_count + 1);
 
         // 5. Audit success (committed together with the booking)
         await tx.auditLog.create({
@@ -152,8 +167,17 @@ export const bookingService = {
           },
         });
 
-        return booking;
+        return { booking, remainingAfter };
       });
+
+      // Outside transaction: update cache best-effort
+      try {
+        await setRemainingCapacity(eventId, result.remainingAfter);
+      } catch {
+        // handled inside service
+      }
+
+      return result.booking;
     } catch (err) {
       if (err instanceof ApiError) {
         await logAuditFailure("BOOK", eventId, userId, err.message);
@@ -169,7 +193,7 @@ export const bookingService = {
    */
   async cancelBooking(eventId: string, userId: string) {
     try {
-      return await prisma.$transaction(async (tx) => {
+      const result = await prisma.$transaction(async (tx) => {
         // 1. Lock event row FIRST (same order as bookEvent → no deadlocks)
         const rows = await tx.$queryRaw<LockedEventRow[]>`
           SELECT id, booked_count
@@ -206,6 +230,7 @@ export const bookingService = {
           SET booked_count = booked_count - 1, updated_at = NOW()
           WHERE id = ${eventId}::uuid
         `;
+        const remainingAfter = event.booked_count - 1;
 
         // 5. Audit success
         await tx.auditLog.create({
@@ -218,8 +243,17 @@ export const bookingService = {
           },
         });
 
-        return cancelled;
+        return { cancelled, remainingAfter };
       });
+
+      // Outside transaction: update cache best-effort
+      try {
+        await setRemainingCapacity(eventId, result.remainingAfter);
+      } catch {
+        // handled inside service
+      }
+
+      return result.cancelled;
     } catch (err) {
       if (err instanceof ApiError) {
         await logAuditFailure("CANCEL", eventId, userId, err.message);
