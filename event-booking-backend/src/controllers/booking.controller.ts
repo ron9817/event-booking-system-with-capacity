@@ -17,8 +17,13 @@ export const bookingController = {
 
   async book(req: Request, res: Response) {
     const { eventId } = req.validated as BookingParams;
-    const booking = await bookingService.bookEvent(eventId, req.userId);
-    ApiResponse.success(res, booking, 201);
+    const result = await bookingService.bookEvent(eventId, req.userId);
+
+    if (result.type === "waitlisted") {
+      ApiResponse.success(res, result.data, 202);
+    } else {
+      ApiResponse.success(res, result.data, 201);
+    }
   },
 
   async cancel(req: Request, res: Response) {

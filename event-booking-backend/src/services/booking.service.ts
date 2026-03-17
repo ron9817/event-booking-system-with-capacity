@@ -2,6 +2,7 @@ import type { Prisma } from "../generated/prisma/client.js";
 import prisma from "../prisma.js";
 import { ApiError } from "../utils/ApiError.js";
 import logger from "../utils/logger.js";
+import { waitlistService } from "./waitlist.service.js";
 import type { UserBookingsQuery } from "../schemas/booking.schema.js";
 
 interface LockedEventRow {
@@ -20,6 +21,10 @@ const BOOKING_SELECT = {
   createdAt: true,
   updatedAt: true,
 } as const;
+
+export type BookEventResult =
+  | { type: "confirmed"; data: Awaited<ReturnType<typeof prisma.booking.create>> }
+  | { type: "waitlisted"; data: Awaited<ReturnType<typeof waitlistService.joinWaitlist>> };
 
 async function logAuditFailure(
   opType: string,
@@ -87,16 +92,15 @@ export const bookingService = {
   },
 
   /**
-   * Books a spot for a user on an event.
+   * Books a spot or falls back to the waitlist when the event is full.
    *
-   * Lock ordering: events row → bookings check → insert booking.
+   * Lock ordering: events row → bookings/waitlist check → insert.
    * Both bookEvent and cancelBooking lock the events row FIRST
    * to guarantee a consistent ordering and prevent deadlocks.
    */
-  async bookEvent(eventId: string, userId: string) {
+  async bookEvent(eventId: string, userId: string): Promise<BookEventResult> {
     try {
       return await prisma.$transaction(async (tx) => {
-        // 1. Acquire row-level lock on the event (pessimistic)
         const rows = await tx.$queryRaw<LockedEventRow[]>`
           SELECT id, capacity, booked_count, is_active, date
           FROM events
@@ -114,11 +118,12 @@ export const bookingService = {
         if (event.date <= new Date()) {
           throw ApiError.badRequest("Event has already passed");
         }
+
         if (event.booked_count >= event.capacity) {
-          throw ApiError.conflict("Event is fully booked");
+          const waitlistEntry = await waitlistService.joinWaitlist(tx, eventId, userId);
+          return { type: "waitlisted" as const, data: waitlistEntry };
         }
 
-        // 2. Prevent duplicate active booking (DB unique index backs this up)
         const existing = await tx.booking.findFirst({
           where: { eventId, userId, status: "CONFIRMED" },
         });
@@ -128,20 +133,17 @@ export const bookingService = {
           );
         }
 
-        // 3. Create booking
         const booking = await tx.booking.create({
           data: { eventId, userId },
           select: BOOKING_SELECT,
         });
 
-        // 4. Atomically increment booked_count (CHECK constraint is the final safety net)
         await tx.$executeRaw`
           UPDATE events
           SET booked_count = booked_count + 1, updated_at = NOW()
           WHERE id = ${eventId}::uuid
         `;
 
-        // 5. Audit success (committed together with the booking)
         await tx.auditLog.create({
           data: {
             opType: "BOOK",
@@ -152,7 +154,7 @@ export const bookingService = {
           },
         });
 
-        return booking;
+        return { type: "confirmed" as const, data: booking };
       });
     } catch (err) {
       if (err instanceof ApiError) {
@@ -163,14 +165,14 @@ export const bookingService = {
   },
 
   /**
-   * Cancels an existing confirmed booking.
+   * Cancels an existing confirmed booking and enqueues an allocation
+   * outbox event so the worker can auto-promote from the waitlist.
    *
    * Lock ordering: events row → bookings update (same as bookEvent).
    */
   async cancelBooking(eventId: string, userId: string) {
     try {
       return await prisma.$transaction(async (tx) => {
-        // 1. Lock event row FIRST (same order as bookEvent → no deadlocks)
         const rows = await tx.$queryRaw<LockedEventRow[]>`
           SELECT id, booked_count
           FROM events
@@ -183,7 +185,6 @@ export const bookingService = {
           throw ApiError.notFound("Event not found");
         }
 
-        // 2. Find the user's active booking
         const booking = await tx.booking.findFirst({
           where: { eventId, userId, status: "CONFIRMED" },
         });
@@ -193,21 +194,18 @@ export const bookingService = {
           );
         }
 
-        // 3. Mark cancelled
         const cancelled = await tx.booking.update({
           where: { id: booking.id },
           data: { status: "CANCELLED" },
           select: BOOKING_SELECT,
         });
 
-        // 4. Atomically decrement booked_count
         await tx.$executeRaw`
           UPDATE events
           SET booked_count = booked_count - 1, updated_at = NOW()
           WHERE id = ${eventId}::uuid
         `;
 
-        // 5. Audit success
         await tx.auditLog.create({
           data: {
             opType: "CANCEL",
@@ -217,6 +215,16 @@ export const bookingService = {
             outcome: "SUCCESS",
           },
         });
+
+        // Transactional outbox: enqueue allocation task in the same tx
+        await tx.allocationOutbox.create({
+          data: { eventId, reason: "CANCELLED" },
+        });
+
+        logger.info(
+          { eventId, userId, bookingId: booking.id },
+          "Booking cancelled, allocation outbox event created",
+        );
 
         return cancelled;
       });

@@ -10,6 +10,7 @@ import { globalLimiter } from "./middlewares/rateLimiter.js";
 import { errorHandler } from "./middlewares/errorHandler.js";
 import eventRoutes from "./routes/event.routes.js";
 import bookingRoutes from "./routes/booking.routes.js";
+import waitlistRoutes from "./routes/waitlist.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import { openApiDocument } from "./docs/openapi.js";
 
@@ -36,6 +37,7 @@ app.get("/health", async (_req, res) => {
 
 app.use("/api/events", eventRoutes);
 app.use("/api/events", bookingRoutes);
+app.use("/api/events", waitlistRoutes);
 app.use("/api/users", userRoutes);
 
 app.use(errorHandler);

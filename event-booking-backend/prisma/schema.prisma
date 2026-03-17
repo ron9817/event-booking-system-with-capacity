@@ -14,6 +14,31 @@ enum BookingStatus {
   @@map("booking_status")
 }
 
+enum WaitlistStatus {
+  WAITING
+  ALLOCATED
+  REMOVED
+  EXPIRED
+
+  @@map("waitlist_status")
+}
+
+enum AllocationOutboxReason {
+  CANCELLED
+  CAPACITY_INCREASED
+
+  @@map("allocation_outbox_reason")
+}
+
+enum AllocationOutboxStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+
+  @@map("allocation_outbox_status")
+}
+
 model Event {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name        String   @db.VarChar(255)
@@ -31,8 +56,10 @@ model Event {
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
 
-  bookings  Booking[]
-  auditLogs AuditLog[]
+  bookings         Booking[]
+  auditLogs        AuditLog[]
+  waitlistEntries  WaitlistEntry[]
+  allocationOutbox AllocationOutbox[]
 
   @@index([date], map: "idx_events_upcoming")
   @@map("events")
@@ -67,4 +94,39 @@ model AuditLog {
 
   @@index([eventId], map: "idx_audit_event_id")
   @@map("audit_logs")
+}
+
+model WaitlistEntry {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String         @map("event_id") @db.Uuid
+  userId        String         @map("user_id") @db.Uuid
+  positionToken BigInt         @default(dbgenerated("nextval('waitlist_position_seq')")) @map("position_token")
+  status        WaitlistStatus @default(WAITING)
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz()
+  allocatedAt   DateTime?      @map("allocated_at") @db.Timestamptz()
+  removedAt     DateTime?      @map("removed_at") @db.Timestamptz()
+  version       Int            @default(1)
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId, status, positionToken], map: "idx_waitlist_next_candidate")
+  @@index([userId], map: "idx_waitlist_user_id")
+  @@map("waitlist_entries")
+}
+
+model AllocationOutbox {
+  id            String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId       String                 @map("event_id") @db.Uuid
+  reason        AllocationOutboxReason
+  status        AllocationOutboxStatus @default(PENDING)
+  attempts      Int                    @default(0)
+  nextAttemptAt DateTime               @default(now()) @map("next_attempt_at") @db.Timestamptz()
+  lastError     String?                @map("last_error") @db.Text
+  createdAt     DateTime               @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt     DateTime               @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt], map: "idx_outbox_pending")
+  @@map("allocation_outbox")
 }
