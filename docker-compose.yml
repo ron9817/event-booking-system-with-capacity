@@ -25,6 +25,7 @@ services:
       NODE_ENV: production
       CORS_ORIGIN: "http://localhost:8080"
       SEED_DATABASE: "true"
+      REDIS_URL: "redis://redis:6379"
     ports:
       - "3000:3000"
     volumes:
@@ -40,6 +41,12 @@ services:
       - "8080:80"
     depends_on:
       - backend
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
 
 volumes:
   pgdata:
