@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { bookingService } from "../services/booking.service.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import type {
+  BookingBody,
   BookingParams,
   UserBookingsParams,
   UserBookingsQuery,
@@ -17,7 +18,8 @@ export const bookingController = {
 
   async book(req: Request, res: Response) {
     const { eventId } = req.validated as BookingParams;
-    const booking = await bookingService.bookEvent(eventId, req.userId);
+    const { quantity } = req.validated as BookingBody;
+    const booking = await bookingService.bookEvent(eventId, req.userId, quantity);
     ApiResponse.success(res, booking, 201);
   },
 

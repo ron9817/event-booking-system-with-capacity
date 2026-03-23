@@ -5,6 +5,7 @@ import {
 } from "@asteasolutions/zod-to-openapi";
 import { z } from "zod";
 import { config } from "../config.js";
+import { MAX_BOOKING_QUANTITY } from "../schemas/booking.schema.js";
 
 extendZodWithOpenApi(z);
 
@@ -55,6 +56,7 @@ const BookingSchema = z
     id: z.string().uuid(),
     eventId: z.string().uuid(),
     userId: z.string().uuid(),
+    quantity: z.number().int(),
     status: z.enum(["CONFIRMED", "CANCELLED"]),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
@@ -64,6 +66,7 @@ const BookingSchema = z
 const UserBookingSchema = z
   .object({
     id: z.string().uuid(),
+    quantity: z.number().int(),
     status: z.enum(["CONFIRMED", "CANCELLED"]),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
@@ -206,17 +209,18 @@ registry.registerPath({
   method: "post",
   path: "/api/events/{eventId}/bookings",
   tags: ["Bookings"],
-  summary: "Book an event (RSVP)",
-  description: `Creates a booking for the authenticated user.
+  summary: "Book an event (multi-seat RSVP)",
+  description: `Creates a booking for the authenticated user with a specified seat quantity.
 
 **Business rules enforced (inside a serialized transaction with pessimistic row locking):**
 1. Event must exist
 2. Event must be active
 3. Event must be in the future
-4. Event must have available capacity
+4. Event must have enough remaining capacity for the requested quantity
 5. User must not already have a confirmed booking
 
-**Concurrency:** Uses \`SELECT ... FOR UPDATE\` to prevent overselling under high load.`,
+**Concurrency:** Uses \`SELECT ... FOR UPDATE\` to prevent overselling under high load.
+Returns a \`409\` with remaining seat count when capacity is insufficient.`,
   request: {
     params: z.object({
       eventId: z.string().uuid().openapi({ description: "Event UUID" }),
@@ -224,6 +228,21 @@ registry.registerPath({
     headers: z.object({
       "x-user-id": z.string().uuid(),
     }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            quantity: z
+              .number()
+              .int()
+              .min(1)
+              .max(MAX_BOOKING_QUANTITY)
+              .openapi({ description: "Number of seats to reserve", example: 2 }),
+          }),
+        },
+      },
+      required: true,
+    },
   },
   responses: {
     201: {
@@ -244,7 +263,8 @@ registry.registerPath({
       content: { "application/json": { schema: ErrorResponse } },
     },
     409: {
-      description: "Event fully booked or user already has an active booking",
+      description:
+        "Insufficient capacity (message includes remaining seats) or user already has an active booking",
       content: { "application/json": { schema: ErrorResponse } },
     },
   },

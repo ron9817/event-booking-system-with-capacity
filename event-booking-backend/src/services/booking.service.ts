@@ -4,6 +4,12 @@ import { ApiError } from "../utils/ApiError.js";
 import logger from "../utils/logger.js";
 import type { UserBookingsQuery } from "../schemas/booking.schema.js";
 
+// 100K requests per 10 min
+// 100K capacity
+
+// event:{event_id}:capacity => 1000k
+
+// 100*60*10 = 600000
 interface LockedEventRow {
   id: string;
   capacity: number;
@@ -16,6 +22,7 @@ const BOOKING_SELECT = {
   id: true,
   eventId: true,
   userId: true,
+  quantity: true,
   status: true,
   createdAt: true,
   updatedAt: true,
@@ -38,6 +45,7 @@ async function logAuditFailure(
 
 const USER_BOOKING_SELECT = {
   id: true,
+  quantity: true,
   status: true,
   createdAt: true,
   updatedAt: true,
@@ -87,16 +95,15 @@ export const bookingService = {
   },
 
   /**
-   * Books a spot for a user on an event.
+   * Books seats for a user on an event.
    *
    * Lock ordering: events row → bookings check → insert booking.
    * Both bookEvent and cancelBooking lock the events row FIRST
    * to guarantee a consistent ordering and prevent deadlocks.
    */
-  async bookEvent(eventId: string, userId: string) {
+  async bookEvent(eventId: string, userId: string, quantity: number) {
     try {
       return await prisma.$transaction(async (tx) => {
-        // 1. Acquire row-level lock on the event (pessimistic)
         const rows = await tx.$queryRaw<LockedEventRow[]>`
           SELECT id, capacity, booked_count, is_active, date
           FROM events
@@ -114,11 +121,16 @@ export const bookingService = {
         if (event.date <= new Date()) {
           throw ApiError.badRequest("Event has already passed");
         }
-        if (event.booked_count >= event.capacity) {
-          throw ApiError.conflict("Event is fully booked");
+
+        const remainingSeats = event.capacity - event.booked_count;
+        if (quantity > remainingSeats) {
+          const msg =
+            remainingSeats === 0
+              ? "Event is fully booked"
+              : `Only ${remainingSeats} seat${remainingSeats === 1 ? "" : "s"} available`;
+          throw ApiError.conflict(msg);
         }
 
-        // 2. Prevent duplicate active booking (DB unique index backs this up)
         const existing = await tx.booking.findFirst({
           where: { eventId, userId, status: "CONFIRMED" },
         });
@@ -128,20 +140,17 @@ export const bookingService = {
           );
         }
 
-        // 3. Create booking
         const booking = await tx.booking.create({
-          data: { eventId, userId },
+          data: { eventId, userId, quantity },
           select: BOOKING_SELECT,
         });
 
-        // 4. Atomically increment booked_count (CHECK constraint is the final safety net)
         await tx.$executeRaw`
           UPDATE events
-          SET booked_count = booked_count + 1, updated_at = NOW()
+          SET booked_count = booked_count + ${quantity}, updated_at = NOW()
           WHERE id = ${eventId}::uuid
         `;
 
-        // 5. Audit success (committed together with the booking)
         await tx.auditLog.create({
           data: {
             opType: "BOOK",
@@ -149,9 +158,11 @@ export const bookingService = {
             userId,
             bookingId: booking.id,
             outcome: "SUCCESS",
+            reason: `quantity=${quantity}`,
           },
         });
 
+        logger.info({ eventId, userId, quantity, bookingId: booking.id }, "Booking created");
         return booking;
       });
     } catch (err) {
@@ -166,11 +177,11 @@ export const bookingService = {
    * Cancels an existing confirmed booking.
    *
    * Lock ordering: events row → bookings update (same as bookEvent).
+   * Decrements booked_count by the booking's stored quantity.
    */
   async cancelBooking(eventId: string, userId: string) {
     try {
       return await prisma.$transaction(async (tx) => {
-        // 1. Lock event row FIRST (same order as bookEvent → no deadlocks)
         const rows = await tx.$queryRaw<LockedEventRow[]>`
           SELECT id, booked_count
           FROM events
@@ -183,7 +194,6 @@ export const bookingService = {
           throw ApiError.notFound("Event not found");
         }
 
-        // 2. Find the user's active booking
         const booking = await tx.booking.findFirst({
           where: { eventId, userId, status: "CONFIRMED" },
         });
@@ -193,21 +203,18 @@ export const bookingService = {
           );
         }
 
-        // 3. Mark cancelled
         const cancelled = await tx.booking.update({
           where: { id: booking.id },
           data: { status: "CANCELLED" },
           select: BOOKING_SELECT,
         });
 
-        // 4. Atomically decrement booked_count
         await tx.$executeRaw`
           UPDATE events
-          SET booked_count = booked_count - 1, updated_at = NOW()
+          SET booked_count = booked_count - ${booking.quantity}, updated_at = NOW()
           WHERE id = ${eventId}::uuid
         `;
 
-        // 5. Audit success
         await tx.auditLog.create({
           data: {
             opType: "CANCEL",
@@ -215,9 +222,11 @@ export const bookingService = {
             userId,
             bookingId: booking.id,
             outcome: "SUCCESS",
+            reason: `quantity=${booking.quantity}`,
           },
         });
 
+        logger.info({ eventId, userId, quantity: booking.quantity, bookingId: booking.id }, "Booking cancelled");
         return cancelled;
       });
     } catch (err) {

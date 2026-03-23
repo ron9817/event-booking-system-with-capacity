@@ -4,7 +4,7 @@ import { asyncHandler } from "../middlewares/asyncHandler.js";
 import { validate } from "../middlewares/validate.js";
 import { extractUserId } from "../middlewares/extractUserId.js";
 import { bookingLimiter } from "../middlewares/rateLimiter.js";
-import { bookingParamsSchema } from "../schemas/booking.schema.js";
+import { bookingParamsSchema, bookingBodySchema } from "../schemas/booking.schema.js";
 
 const router = Router();
 
@@ -13,6 +13,7 @@ router.post(
   bookingLimiter,
   extractUserId,
   validate(bookingParamsSchema, "params"),
+  validate(bookingBodySchema, "body"),
   asyncHandler(bookingController.book),
 );
 

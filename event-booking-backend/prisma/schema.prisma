@@ -42,13 +42,15 @@ model Booking {
   id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   eventId   String        @map("event_id") @db.Uuid
   userId    String        @map("user_id") @db.Uuid
+  quantity  Int           @default(1)
   status    BookingStatus @default(CONFIRMED)
   createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
 
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
-  @@unique([eventId, userId], map: "unique_active_booking")
+  // unique_active_booking is a partial unique index (WHERE status = 'CONFIRMED')
+  // managed via SQL migration since Prisma cannot represent filtered indexes.
   @@index([userId], map: "idx_bookings_user_id")
   @@map("bookings")
 }
